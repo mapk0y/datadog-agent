@@ -7,8 +7,6 @@ package stats
 
 import (
 	"bytes"
-	"sort"
-
 	"github.com/DataDog/datadog-agent/pkg/trace/stats/quantile"
 )
 
@@ -16,8 +14,6 @@ import (
 // is that the final data, the one with send after a call to Export(), is correct.
 
 type groupedStats struct {
-	tags TagSet
-
 	topLevel float64
 
 	hits                    float64
@@ -28,36 +24,27 @@ type groupedStats struct {
 }
 
 type sublayerStats struct {
-	tags TagSet
-
 	topLevel float64
 
 	value int64
 }
 
-func newGroupedStats(tags TagSet) groupedStats {
+func newGroupedStats() groupedStats {
 	return groupedStats{
-		tags:                    tags,
 		durationDistribution:    quantile.NewSliceSummary(),
 		errDurationDistribution: quantile.NewSliceSummary(),
 	}
 }
 
-func newSublayerStats(tags TagSet) sublayerStats {
-	return sublayerStats{
-		tags: tags,
-	}
-}
-
 type statsKey struct {
 	name string
-	aggr string
+	aggr aggregation
 }
 
 type statsSubKey struct {
 	name string
 	sub  SublayerValue
-	aggr string
+	aggr aggregation
 }
 
 // RawBucket is used to compute span data and aggregate it
@@ -95,11 +82,12 @@ func (sb *RawBucket) Export() Bucket {
 	ret := NewBucket(sb.start, sb.duration)
 	for k, v := range sb.data {
 		hitsKey := GrainKey(k.name, HITS, k.aggr)
+		tagSet := k.aggr.toTags()
 		ret.Counts[hitsKey] = Count{
 			Key:      hitsKey,
 			Name:     k.name,
 			Measure:  HITS,
-			TagSet:   v.tags,
+			TagSet:   tagSet,
 			TopLevel: v.topLevel,
 			Value:    float64(v.hits),
 		}
@@ -108,7 +96,7 @@ func (sb *RawBucket) Export() Bucket {
 			Key:      errorsKey,
 			Name:     k.name,
 			Measure:  ERRORS,
-			TagSet:   v.tags,
+			TagSet:   tagSet,
 			TopLevel: v.topLevel,
 			Value:    float64(v.errors),
 		}
@@ -117,7 +105,7 @@ func (sb *RawBucket) Export() Bucket {
 			Key:      durationKey,
 			Name:     k.name,
 			Measure:  DURATION,
-			TagSet:   v.tags,
+			TagSet:   tagSet,
 			TopLevel: v.topLevel,
 			Value:    float64(v.duration),
 		}
@@ -125,7 +113,7 @@ func (sb *RawBucket) Export() Bucket {
 			Key:      durationKey,
 			Name:     k.name,
 			Measure:  DURATION,
-			TagSet:   v.tags,
+			TagSet:   tagSet,
 			TopLevel: v.topLevel,
 			Summary:  v.durationDistribution,
 		}
@@ -133,18 +121,19 @@ func (sb *RawBucket) Export() Bucket {
 			Key:      durationKey,
 			Name:     k.name,
 			Measure:  DURATION,
-			TagSet:   v.tags,
+			TagSet:   tagSet,
 			TopLevel: v.topLevel,
 			Summary:  v.errDurationDistribution,
 		}
 	}
 	for k, v := range sb.sublayerData {
-		key := GrainKey(k.name, k.sub.Metric, k.aggr+","+k.sub.Tag.Name+":"+k.sub.Tag.Value)
+		key := GrainKey(k.name, k.sub.Metric, k.aggr) + "," + k.sub.Tag.Name + ":" + k.sub.Tag.Value
+		tagSet := append(k.aggr.toTags(), k.sub.Tag)
 		ret.Counts[key] = Count{
 			Key:      key,
 			Name:     k.name,
 			Measure:  k.sub.Metric,
-			TagSet:   v.tags,
+			TagSet:   tagSet,
 			TopLevel: v.topLevel,
 			Value:    float64(v.value),
 		}
@@ -152,73 +141,27 @@ func (sb *RawBucket) Export() Bucket {
 	return ret
 }
 
-func assembleGrain(b *bytes.Buffer, env, resource, service string, m map[string]string) (string, TagSet) {
-	b.Reset()
-
-	b.WriteString("env:")
-	b.WriteString(env)
-	b.WriteString(",resource:")
-	b.WriteString(resource)
-	b.WriteString(",service:")
-	b.WriteString(service)
-
-	tagset := TagSet{{"env", env}, {"resource", resource}, {"service", service}}
-
-	if m == nil || len(m) == 0 {
-		return b.String(), tagset
-	}
-
-	keys := make([]string, len(m))
-	j := 0
-	for k := range m {
-		keys[j] = k
-		j++
-	}
-
-	sort.Strings(keys) // required else aggregations would not work
-
-	for _, key := range keys {
-		b.WriteRune(',')
-		b.WriteString(key)
-		b.WriteRune(':')
-		b.WriteString(m[key])
-		tagset = append(tagset, Tag{key, m[key]})
-	}
-
-	return b.String(), tagset
-}
-
 // HandleSpan adds the span to this bucket stats, aggregated with the finest grain matching given aggregators
-func (sb *RawBucket) HandleSpan(s *WeightedSpan, env string, aggregators []string, sublayers []SublayerValue) {
+func (sb *RawBucket) HandleSpan(s *WeightedSpan, env string, sublayers []SublayerValue) {
 	if env == "" {
 		panic("env should never be empty")
 	}
 
-	m := make(map[string]string)
-
-	for _, agg := range aggregators {
-		if agg != "env" && agg != "resource" && agg != "service" {
-			if v, ok := s.Meta[agg]; ok {
-				m[agg] = v
-			}
-		}
-	}
-
-	grain, tags := assembleGrain(&sb.keyBuf, env, s.Resource, s.Service, m)
-	sb.add(s, grain, tags)
+	aggr := newAggregationFromSpan(s.Span, env)
+	sb.add(s, aggr)
 
 	for _, sub := range sublayers {
-		sb.addSublayer(s, grain, tags, sub)
+		sb.addSublayer(s, aggr, sub)
 	}
 }
 
-func (sb *RawBucket) add(s *WeightedSpan, aggr string, tags TagSet) {
+func (sb *RawBucket) add(s *WeightedSpan, aggr aggregation) {
 	var gs groupedStats
 	var ok bool
 
 	key := statsKey{name: s.Name, aggr: aggr}
 	if gs, ok = sb.data[key]; !ok {
-		gs = newGroupedStats(tags)
+		gs = newGroupedStats()
 	}
 
 	if s.TopLevel {
@@ -243,7 +186,7 @@ func (sb *RawBucket) add(s *WeightedSpan, aggr string, tags TagSet) {
 	sb.data[key] = gs
 }
 
-func (sb *RawBucket) addSublayer(s *WeightedSpan, aggr string, tags TagSet, sub SublayerValue) {
+func (sb *RawBucket) addSublayer(s *WeightedSpan, aggr aggregation, sub SublayerValue) {
 	// This is not as efficient as a "regular" add as we don't update
 	// all sublayers at once (one call for HITS, and another one for ERRORS, DURATION...)
 	// when logically, if we have a sublayer for HITS, we also have one for DURATION,
@@ -252,13 +195,9 @@ func (sb *RawBucket) addSublayer(s *WeightedSpan, aggr string, tags TagSet, sub 
 	var ss sublayerStats
 	var ok bool
 
-	subTags := make(TagSet, len(tags)+1)
-	copy(subTags, tags)
-	subTags[len(tags)] = sub.Tag
-
 	key := statsSubKey{name: s.Name, sub: sub, aggr: aggr}
 	if ss, ok = sb.sublayerData[key]; !ok {
-		ss = newSublayerStats(subTags)
+		ss = sublayerStats{}
 	}
 
 	if s.TopLevel {
