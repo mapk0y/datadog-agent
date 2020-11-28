@@ -90,11 +90,11 @@ func (m *Module) Register(httpMux *http.ServeMux) error {
 		return err
 	}
 
+	m.probe.SetEventHandler(m)
+
 	if err := m.Reload(); err != nil {
 		return err
 	}
-
-	m.probe.SetEventHandler(m)
 
 	signal.Notify(m.sigupChan, syscall.SIGHUP)
 
@@ -136,6 +136,7 @@ func (m *Module) Reload() error {
 
 	ruleSet.AddListener(m)
 	ruleIDs := ruleSet.ListRuleIDs()
+	ruleIDs = append(ruleIDs, sprobe.AllCustomRuleIDs()...)
 
 	m.eventServer.Apply(ruleIDs)
 	m.rateLimiter.Apply(ruleIDs)
@@ -144,6 +145,10 @@ func (m *Module) Reload() error {
 	m.ruleSets[m.currentRuleSet] = ruleSet
 
 	m.displayReport(report)
+
+	// report that a new policy was loaded
+	monitor := m.probe.GetMonitor()
+	monitor.ReportRuleSetLoaded(ruleSet, time.Now())
 
 	return nil
 }
