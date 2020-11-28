@@ -122,7 +122,7 @@ func (lc *LoadController) discardNoisiestProcess() {
 		}
 
 		// fetch noisy process metadata
-		process := lc.probe.resolvers.ProcessResolver.resolve(maxKey.Pid)
+		process := lc.probe.resolvers.ProcessResolver.Resolve(maxKey.Pid)
 
 		lc.probe.DispatchCustomEvent(
 			NewNoisyProcessEvent(
