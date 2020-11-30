@@ -70,7 +70,7 @@ func (p *PathKey) MarshalBinary() ([]byte, error) {
 
 type PathValue struct {
 	Parent PathKey
-	Name   [128]byte
+	Name   [MaxSegmentLength + 1]byte
 }
 
 func (dr *DentryResolver) DelCacheEntry(mountID uint32, inode uint64) {
@@ -146,9 +146,11 @@ func (dr *DentryResolver) ResolveFromCache(mountID uint32, inode uint64) (filena
 }
 
 // ResolveFromMap resolves from kernel map
-func (dr *DentryResolver) ResolveFromMap(mountID uint32, inode uint64, pathID uint32) (filename string, err error) {
+func (dr *DentryResolver) ResolveFromMap(mountID uint32, inode uint64, pathID uint32) (string, error) {
 	key := PathKey{MountID: mountID, Inode: inode, PathID: pathID}
 	var path PathValue
+	var filename, segment string
+	var err, resolutionErr error
 
 	keyBuffer, err := key.MarshalBinary()
 	if err != nil {
@@ -168,9 +170,18 @@ func (dr *DentryResolver) ResolveFromMap(mountID uint32, inode uint64, pathID ui
 		cacheKey := PathKey{MountID: key.MountID, Inode: key.Inode}
 		toAdd[cacheKey] = path
 
+		if path.Name[0] == '\x15' {
+			resolutionErr = ErrTruncatedParents{}
+			break
+		}
+
 		// Don't append dentry name if this is the root dentry (i.d. name == '/')
 		if path.Name[0] != '\x00' && path.Name[0] != '/' {
-			filename = "/" + C.GoString((*C.char)(unsafe.Pointer(&path.Name))) + filename
+			segment = C.GoString((*C.char)(unsafe.Pointer(&path.Name)))
+			if len(segment) > (MaxSegmentLength) {
+				resolutionErr = ErrTruncatedSegment{}
+			}
+			filename = "/" + segment + filename
 		}
 
 		if path.Parent.Inode == 0 {
@@ -179,6 +190,11 @@ func (dr *DentryResolver) ResolveFromMap(mountID uint32, inode uint64, pathID ui
 
 		// Prepare next key
 		key = path.Parent
+	}
+
+	// resolution errors are more important than regular map lookup errors
+	if resolutionErr != nil {
+		err = resolutionErr
 	}
 
 	if len(filename) == 0 {
@@ -198,12 +214,12 @@ func (dr *DentryResolver) ResolveFromMap(mountID uint32, inode uint64, pathID ui
 }
 
 // Resolve the pathname of a dentry, starting at the pathnameKey in the pathnames table
-func (dr *DentryResolver) Resolve(mountID uint32, inode uint64, pathID uint32) string {
+func (dr *DentryResolver) Resolve(mountID uint32, inode uint64, pathID uint32) (string, error) {
 	path, err := dr.ResolveFromCache(mountID, inode)
 	if err != nil {
-		path, _ = dr.ResolveFromMap(mountID, inode, pathID)
+		path, err = dr.ResolveFromMap(mountID, inode, pathID)
 	}
-	return path
+	return path, err
 }
 
 func (dr *DentryResolver) getParentFromCache(mountID uint32, inode uint64) (uint32, uint64, error) {

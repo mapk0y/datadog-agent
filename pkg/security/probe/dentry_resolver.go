@@ -11,6 +11,20 @@ const (
 	dentryPathKeyNotFound = "error: dentry path key not found"
 )
 
+// ErrTruncatedSegment is used to notify that a segment of the path was truncated because it was too long
+type ErrTruncatedSegment struct {}
+
+func (err ErrTruncatedSegment) Error() string {
+	return "truncated_segment"
+}
+
+// ErrTruncatedParents is used to notify that some parents of the path are missing
+type ErrTruncatedParents struct {}
+
+func (err ErrTruncatedParents) Error() string {
+	return "truncated_parents"
+}
+
 // NewDentryResolver returns a new dentry resolver
 func NewDentryResolver(probe *Probe) (*DentryResolver, error) {
 	return &DentryResolver{

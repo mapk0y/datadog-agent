@@ -18,6 +18,6 @@ func (dr *DentryResolver) GetName(mountID uint32, inode uint64, pathID uint32) s
 }
 
 // Resolve the pathname of a dentry, starting at the pathnameKey in the pathnames table
-func (dr *DentryResolver) Resolve(mountID uint32, inode uint64, pathID uint32) string {
-	return ""
+func (dr *DentryResolver) Resolve(mountID uint32, inode uint64, pathID uint32) (string, error) {
+	return "", nil
 }
